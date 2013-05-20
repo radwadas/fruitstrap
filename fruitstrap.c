@@ -13,6 +13,7 @@
 #define FDVENDOR_PATH  "/tmp/fruitstrap-remote-debugserver"
 #define PREP_CMDS_PATH "/tmp/fruitstrap-gdb-prep-cmds"
 #define GDB_SHELL      "--arch armv7f -x " PREP_CMDS_PATH
+#define ENV_ARG_LIMIT    256
 
 // approximation of what Xcode does:
 #define GDB_PREP_CMDS CFSTR("set mi-show-protections off\n\
@@ -21,6 +22,7 @@
     set remote max-packet-size 1024\n\
     set sharedlibrary check-uuids on\n\
     set env NSUnbufferedIO YES\n\
+    {env_args_str}\n\
     set minimal-signal-handling 1\n\
     set sharedlibrary load-rules \\\".*\\\" \\\".*\\\" container\n\
     set inferior-auto-start-dyld 0\n\
@@ -52,6 +54,8 @@ char *app_path = NULL;
 char *device_id = NULL;
 char *args = NULL;
 char *gdb_args = "";
+char *env_args[ENV_ARG_LIMIT];
+int env_args_idx = 0;
 int timeout = 0;
 CFStringRef last_path = NULL;
 service_conn_t gdbfd;
@@ -378,6 +382,22 @@ void write_gdb_prep_cmds(AMDeviceRef device, CFURLRef disk_app_url) {
     } else {
         CFStringFindAndReplace(cmds, CFSTR(" {args}"), CFSTR(""), range, 0);
     }
+    
+    range.length = CFStringGetLength(cmds);
+
+    if (env_args_idx > 0) {
+		CFMutableStringRef cf_env_args = CFStringCreateMutable (NULL, 0);
+  		CFStringRef separator = CFSTR("\n    set env ");
+    	for (int i = 0; i < env_args_idx; i++) {
+    		CFStringAppend(cf_env_args, separator);
+    		CFStringAppendCString(cf_env_args, env_args[i], kCFStringEncodingASCII);
+        }
+		CFStringFindAndReplace(cmds, CFSTR("{env_args_str}"), cf_env_args, range, 0);
+		CFRelease(cf_env_args);
+    } else {
+        CFStringFindAndReplace(cmds, CFSTR(" {env_args_str}"), CFSTR(""), range, 0);
+    }
+    
     range.length = CFStringGetLength(cmds);
 
     CFStringRef bundle_identifier = copy_disk_app_identifier(disk_app_url);
@@ -550,10 +570,8 @@ void handle_device(AMDeviceRef device) {
              exit(1);
         } else {
             CFStringRef gdb_cmd = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@ %@ %s"), path, CFSTR(GDB_SHELL), gdb_args);
- 
             // Convert CFStringRef to char* for system call
             const char *char_gdb_cmd = CFStringGetCStringPtr(gdb_cmd, kCFStringEncodingMacRoman);
-
             system(char_gdb_cmd);      // launch gdb
         }
         kill(parent, SIGHUP);  // "No. I am your father."
@@ -583,7 +601,7 @@ void timeout_callback(CFRunLoopTimerRef timer, void *info) {
 }
 
 void usage(const char* app) {
-    printf("usage: %s [-d/--debug] [-i/--id device_id] -b/--bundle bundle.app [-a/--args arguments] [-t/--timeout timeout(seconds)] [-u/--unbuffered] [-g/--gdbargs gdbarguments]\n", app);
+    printf("usage: %s [-d/--debug] [-i/--id device_id] -b/--bundle bundle.app [-a/--args arguments] [-t/--timeout timeout(seconds)] [-u/--unbuffered] [-g/--gdbargs gdbarguments] [-e/--env_var \"variable value\"]\n", app);
 }
 
 int main(int argc, char *argv[]) {
@@ -596,11 +614,12 @@ int main(int argc, char *argv[]) {
         { "timeout", required_argument, NULL, 't' },
         { "unbuffered", no_argument, NULL, 'u' },
         { "gbdbargs", required_argument, NULL, 'g' },
+        { "env_var", required_argument, NULL, 'e' },
         { NULL, 0, NULL, 0 },
     };
     char ch;
 
-    while ((ch = getopt_long(argc, argv, "dvi:b:a:t:u:g:", longopts, NULL)) != -1)
+    while ((ch = getopt_long(argc, argv, "dvi:b:a:t:u:g:e:", longopts, NULL)) != -1)
     {
         switch (ch) {
         case 'd':
@@ -626,6 +645,13 @@ int main(int argc, char *argv[]) {
             break;
         case 'g':
             gdb_args = optarg;
+            break;
+        case 'e':
+        	if (env_args_idx < ENV_ARG_LIMIT)
+        	{
+            	env_args[env_args_idx] = optarg;
+            	env_args_idx++;
+            }
             break;
         default:
             usage(argv[0]);
